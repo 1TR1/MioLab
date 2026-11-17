@@ -1,0 +1,6 @@
+// 导入目标平台的 SQLite 公共头，避免绝对路径破坏交叉编译。
+module CSQLite [system] {
+    header "shim.h"
+    link "sqlite3"
+    export *
+}

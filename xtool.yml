@@ -1,0 +1,5 @@
+# 原生通用应用；版本与文档关联声明由 Info.plist 提供。
+version: 1
+bundleID: com.miolib.reader
+infoPath: Info.plist
+iconPath: Assets/AppIcon.png

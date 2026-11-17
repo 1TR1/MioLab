@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<!-- 应用身份、通用设备支持及 USB 文件共享。 -->
+<key>CFBundleDisplayName</key><string>MioLib</string>
+<!-- 1.6.3 合并列表布局调整与可切换的书架四宫格封面。 -->
+<key>CFBundleShortVersionString</key><string>1.6.3</string>
+<key>CFBundleVersion</key><string>13</string>
+<key>LSRequiresIPhoneOS</key><true/>
+<key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+<key>UIFileSharingEnabled</key><true/>
+<key>LSSupportsOpeningDocumentsInPlace</key><true/>
+<!-- Calibre 在用户的局域网内提供书库，不为公网请求关闭 ATS。 -->
+<key>NSLocalNetworkUsageDescription</key><string>连接你电脑上的 Calibre 内容服务器，浏览书库并下载所选电子书。</string>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+<key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+<key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+<!-- 注册已有文档类型，接收其他应用传入的原始文件。 -->
+<key>CFBundleDocumentTypes</key><array><dict>
+<key>CFBundleTypeName</key><string>电子书与书库备份</string>
+<key>CFBundleTypeRole</key><string>Viewer</string>
+<key>LSHandlerRank</key><string>Alternate</string>
+<key>LSItemContentTypes</key><array><string>org.idpf.epub-container</string><string>public.plain-text</string><string>com.adobe.pdf</string><string>com.miolib.mobi</string><string>com.miolib.azw3</string><string>com.miolib.backup</string></array>
+</dict></array>
+<!-- MOBI / AZW3 为导入类型，备份为应用自有导出类型。 -->
+<key>UTImportedTypeDeclarations</key><array>
+<dict><key>UTTypeIdentifier</key><string>com.miolib.mobi</string><key>UTTypeDescription</key><string>Mobipocket 电子书</string><key>UTTypeConformsTo</key><array><string>public.data</string><string>public.content</string></array><key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>mobi</string></array><key>public.mime-type</key><string>application/x-mobipocket-ebook</string></dict></dict>
+<dict><key>UTTypeIdentifier</key><string>com.miolib.azw3</string><key>UTTypeDescription</key><string>Kindle KF8 电子书</string><key>UTTypeConformsTo</key><array><string>public.data</string><string>public.content</string></array><key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>azw3</string></array><key>public.mime-type</key><string>application/vnd.amazon.ebook</string></dict></dict>
+</array>
+<key>UTExportedTypeDeclarations</key><array><dict><key>UTTypeIdentifier</key><string>com.miolib.backup</string><key>UTTypeDescription</key><string>MioLib 书库备份</string><key>UTTypeConformsTo</key><array><string>public.zip-archive</string></array><key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>miolib</string></array></dict></dict></array>
+</dict></plist>

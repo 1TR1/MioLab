@@ -1,0 +1,29 @@
+.build/
+.swiftpm/
+.xtool/
+xtool/
+.bsp/
+build/
+output/
+*.ipa
+*.app/
+.DS_Store
+__pycache__/
+*.pyc
+Packages/MioLibCore/.build/
+Packages/MioLibCore/.swiftpm/
+
+# Windows 自动生成的缩略图和文件夹配置不随源码上传。
+Thumbs.db
+Desktop.ini
+
+# 本机环境密钥及开发签名保留在本地，示例配置可正常提交。
+.env
+.env.*
+!.env.example
+!.env.sample
+*.p12
+*.pfx
+*.mobileprovision
+*.key
+*.pem
