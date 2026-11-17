@@ -1,0 +1,31 @@
+/* 仅调整可重排正文的版式，颜色与字体选择仍由既有阅读偏好管理。 */
+:root[style] body p {
+  text-indent: 2em !important;
+  text-align: justify !important;
+  margin-block: 0.45em !important;
+  overflow-wrap: break-word;
+  orphans: 2;
+  widows: 2;
+}
+
+/* 书中已经带有首行空格时保留原文，避免再叠加两字缩进。 */
+:root[style] body p[data-miolib-preindented] {
+  text-indent: 0 !important;
+}
+
+/* 每个章节文件的章标题居中加粗；不改写文字节点及其定位路径。 */
+:root[style] body [data-miolib-chapter-title] {
+  text-align: center !important;
+  text-indent: 0 !important;
+  font-size: 1.12rem !important;
+  font-weight: 700 !important;
+  line-height: 1.5 !important;
+  margin-block: 0.65rem 1.05rem !important;
+  break-after: avoid;
+}
+
+/* 诗歌、引文、图注及表格沿用各自排版，避免将非普通段落强制排成小说正文。 */
+:root[style] body :is(blockquote, figure, table, pre) p {
+  text-indent: 0 !important;
+  text-align: start !important;
+}

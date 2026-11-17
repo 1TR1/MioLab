@@ -50,7 +50,7 @@ struct ReaderMatch: Identifiable {
   let savesProgress: Bool
   @Published var loading = true
   @Published var error: String?
-  @Published var controls = true
+  @Published var controls = false
   @Published var progress: Double
   @Published var positionLabel = ""
   @Published var entries: [ReaderEntry] = [] {
@@ -59,6 +59,25 @@ struct ReaderMatch: Identifiable {
   @Published var outline: [ReaderOutlineNode] = []
   @Published var currentPage = 1
   @Published var pageCount = 0
+  // 实际屏幕分页独立于 Readium 的稳定位置编号，不参与进度存储或目录跳转。
+  @Published var renderedPage: ReaderRenderedPage?
+  var footerLabel: String {
+    if loading { return "" }
+    if book.format == .pdf || publication?.metadata.layout == .fixed {
+      return pageCount > 0 ? "\(currentPage)/\(pageCount)" : ""
+    }
+    if !model.preferences.scroll, let renderedPage { return "\(renderedPage.current)/\(renderedPage.count)" }
+    return "\(ReadingProgress.percent(progress))%"
+  }
+  var footerAccessibilityLabel: String {
+    if book.format == .pdf || publication?.metadata.layout == .fixed {
+      return "第 \(currentPage) 页，共 \(pageCount) 页"
+    }
+    if !model.preferences.scroll, let renderedPage {
+      return "本节第 \(renderedPage.current) 页，共 \(renderedPage.count) 页"
+    }
+    return "全书进度 \(ReadingProgress.percent(progress))%"
+  }
   @Published var matches: [ReaderMatch] = []
   @Published var searching = false
   @Published var searchMessage = ""
@@ -550,15 +569,52 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
   }
   private func epubPreferences(_ value: ReaderPreferences) -> EPUBPreferences {
     EPUBPreferences(
-      fontFamily: value.serif ? .serif : .sansSerif, fontSize: value.fontSize / 100,
-      lineHeight: value.lineHeight, pageMargins: value.margins, publisherStyles: false,
-      scroll: value.scroll,
+      fontFamily: value.serif ? .serif : .sansSerif, fontSize: value.fontSize / 100 * 1.125,
+      lineHeight: value.lineHeight, pageMargins: value.margins,
+      paragraphIndent: 2, paragraphSpacing: 0.45, publisherStyles: false,
+      scroll: value.scroll, textAlign: .justify,
       theme: value.theme == .paper
         ? .sepia
         : value.theme == .dark
           ? .dark
           : value.theme == .light
             ? .light : traitCollection.userInterfaceStyle == .dark ? .dark : .light)
+  }
+
+  // 正常阅读的页眉、页脚已经避开安全区，不再让 Readium 重复添加上下 62 点空白。
+  func navigatorContentInset(_ navigator: VisualNavigator) -> UIEdgeInsets? {
+    session?.savesProgress == true ? .zero : nil
+  }
+
+  // 样式只注入可重排 EPUB；固定版式与 PDF 完整保留原书页内容。
+  func navigator(_ navigator: EPUBNavigatorViewController, setupUserScripts controller: WKUserContentController) {
+    guard session?.publication?.metadata.layout != .fixed,
+      let url = Bundle.module.url(forResource: "ReaderLayout", withExtension: "css"),
+      let css = try? String(contentsOf: url, encoding: .utf8),
+      let data = try? JSONSerialization.data(withJSONObject: [css]),
+      let encoded = String(data: data, encoding: .utf8) else { return }
+    let script = """
+      (() => {
+        // 独立样式不包含颜色声明，继续由 Readium 实时应用主题。
+        const style = document.createElement('style');
+        style.textContent = \(encoded)[0];
+        document.head.appendChild(style);
+        // 识别已有章标题，包括旧版 TXT 阅读副本的首段标题，不插入或替换文字。
+        const first = [...document.querySelectorAll('body h1, body h2, body p, body [role="heading"]')]
+          .find(element => element.textContent.trim());
+        if (first && (first.matches('h1,h2,[role="heading"]') ||
+            first.textContent.trim() === document.title.trim())) {
+          first.setAttribute('data-miolib-chapter-title', '');
+        }
+        // 保留原文自带缩进，使已导入书籍也能直接使用新的版式。
+        for (const paragraph of document.querySelectorAll('p')) {
+          if (/^[\\u3000]|^[ \\t]{2,}/.test(paragraph.textContent)) {
+            paragraph.setAttribute('data-miolib-preindented', '');
+          }
+        }
+      })();
+      """
+    controller.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
   }
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
     super.traitCollectionDidChange(previousTraitCollection)
@@ -686,6 +742,10 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
   private func updateEPUBProgress(_ navigator: EPUBNavigatorViewController, locator: Locator) {
     guard let session, let json = try? locator.jsonString() else { return }
     let visible = navigator.viewport?.resources.last
+    // 分页按真实可见范围计算，字号、边距及旋转引发的重新排版会自动刷新。
+    session.renderedPage = navigator.viewport?.resources.first.flatMap {
+      ReaderRenderedPage(progression: $0.progression)
+    }
     let last = session.publication?.readingOrder.last?.url()
     let value = ReadingProgress.text(raw: locator.locations.totalProgression ?? locator.locations.progression ?? 0,
       isLastResource: visible?.href == last && last != nil, visibleResourceEnd: visible?.progression.upperBound)

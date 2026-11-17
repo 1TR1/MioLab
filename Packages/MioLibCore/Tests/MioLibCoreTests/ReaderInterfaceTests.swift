@@ -4,6 +4,22 @@ import XCTest
 
 // 更新不能丢失旧版偏好，排序和受支持的布局必须随数据库及备份往返保留。
 final class ReaderInterfaceTests: XCTestCase {
+  // 真实分页来自可见宽度而非稳定位置列表，验证首末页与浮点误差。
+  func testRenderedPagesFollowViewportAndRepagination() throws {
+    XCTAssertEqual(try XCTUnwrap(ReaderRenderedPage(progression: 0...(1.0 / 32))).current, 1)
+    let last = try XCTUnwrap(ReaderRenderedPage(progression: (31.0 / 32)...1))
+    XCTAssertEqual(last.current, 32)
+    XCTAssertEqual(last.count, 32)
+    let resized = try XCTUnwrap(ReaderRenderedPage(progression: 0.5...0.55))
+    XCTAssertEqual(resized.count, 20)
+    XCTAssertEqual(resized.current, 11)
+    XCTAssertEqual(try XCTUnwrap(ReaderRenderedPage(progression: 0...1)).count, 1)
+    XCTAssertNil(ReaderRenderedPage(progression: 0...0))
+    XCTAssertNil(ReaderRenderedPage(progression: (-0.1)...0.1))
+    XCTAssertNil(ReaderRenderedPage(progression: 0...0.00000001))
+    XCTAssertNil(ReaderRenderedPage(progression: 0...Double.infinity))
+  }
+
   func testLegacyPreferencesKeepCoverLayoutAndReadingValues() throws {
     let data = Data(#"{"theme":"paper","fontSize":135,"lineHeight":1.8,"margins":2,"serif":true,"scroll":true,"grid":true}"#.utf8)
     let prefs = try LibraryJSON.decode(ReaderPreferences.self, from: data)

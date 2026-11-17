@@ -57,6 +57,10 @@ with zipfile.ZipFile(source) as archive:
     # 新版设置卡片必须随源码交付，避免解压后缺失共享界面组件。
     assert 'Sources/MioLib/RoundedSettingsStyle.swift' in archive.namelist()
     assert 'Sources/MioLib/InterfaceTypography.swift' in archive.namelist()
+    # 阅读布局、实际分页及相关说明必须与可自行导入的 IPA 一同归档。
+    assert 'Sources/MioLib/ReaderPageChrome.swift' in archive.namelist()
+    assert 'Sources/MioLib/Resources/ReaderLayout.css' in archive.namelist()
+    assert 'docs/阅读页面布局.md' in archive.namelist()
 
 # 摘要流式计算，旧版本条目保留，方便安装或传输后核对。
 manifest_path = output / 'delivery.json'

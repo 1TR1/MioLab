@@ -19,26 +19,56 @@ struct ReaderScreen: View {
     _session = StateObject(wrappedValue: ReaderSession(model: model, book: book))
   }
   var body: some View {
-    ZStack {
-      (model.preferences.theme == .paper
-        ? Color(red: 0.96, green: 0.93, blue: 0.86) : Color(.systemBackground)).ignoresSafeArea()
-      ReaderSurface(session: session).padding(.top, 58).padding(.bottom, 118)
-      if session.loading {
-        ProgressView("正在打开书籍…").padding(24).background(
-          .regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+    GeometryReader { geometry in
+      ZStack {
+        // 容器遵守系统安全区，摄像头、刘海、灵动岛及横屏侧边避让由系统提供。
+        VStack(spacing: 0) {
+          Button { session.controls.toggle() } label: {
+            Text(session.positionLabel.isEmpty ? book.title : session.positionLabel)
+              .font(.system(size: 12)).lineLimit(1)
+              .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+              .contentShape(Rectangle())
+          }.buttonStyle(.plain).accessibilityLabel("显示阅读工具栏")
+            .padding(.horizontal, pageMargin(geometry.size.width))
+            .padding(.top, 16)
+            .opacity(session.controls ? 0 : 1).allowsHitTesting(!session.controls)
+          // 正文在页眉和页脚之间额外留出上下各 24 点，工具栏显隐时保留同一页高。
+          ReaderSurface(session: session)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.vertical, 24)
+          ReaderPageFooter(session: session)
+            .padding(.horizontal, pageMargin(geometry.size.width))
+            .padding(.bottom, 8)
+            .opacity(session.controls ? 0 : 1)
+        }
+        .foregroundStyle(ReaderPagePalette(theme: model.preferences.theme).ink.opacity(0.7))
+        .dynamicTypeSize(.large).fontDesign(.default)
+        if session.loading {
+          ProgressView("正在打开书籍…").padding(24).background(
+            .regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+        }
       }
-      if session.controls {
-        MioGlassGroup {
-          VStack(spacing: 0) {
-            topBar
-            Spacer()
-            bottomBar
-          }.padding(.horizontal, 12).padding(.vertical, 6)
-        }.transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
+      .frame(width: geometry.size.width, height: geometry.size.height)
+      // 只有装饰背景延伸到屏幕边缘，不能把忽略安全区传播给正文和按钮。
+      .background(ReaderPagePalette(theme: model.preferences.theme).background.ignoresSafeArea())
+      // 分别锚定上下边缘，避免共享 Spacer 或玻璃容器将工具栏错误地放到中间。
+      .overlay(alignment: .top) {
+        if session.controls {
+          MioGlassGroup { topBar }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 12).padding(.top, 8).transition(.opacity)
+        }
+      }
+      .overlay(alignment: .bottom) {
+        if session.controls {
+          MioGlassGroup { bottomBar }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 12).padding(.bottom, 8).transition(.opacity)
+        }
       }
     }
-    .animation(reduceMotion ? nil : .spring(duration: 0.26, bounce: 0.15), value: session.controls)
-    .statusBarHidden(!session.controls)
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: session.controls)
+    .statusBarHidden(true)
     .sheet(item: $panel) { item in
       switch item {
       case .contents: ReaderContentsView(session: session)
@@ -68,6 +98,10 @@ struct ReaderScreen: View {
       Task { await session.flush() }
       session.close()
     }
+  }
+  // 左右留白与 Readium 的 20 点基准一致，小屏和大边距设置仍保留可读宽度。
+  private func pageMargin(_ width: CGFloat) -> CGFloat {
+    min(width * 0.2, max(10, 20 * model.preferences.margins))
   }
   private var topBar: some View {
     HStack(spacing: 18) {

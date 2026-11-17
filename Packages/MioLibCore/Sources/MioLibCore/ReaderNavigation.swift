@@ -1,5 +1,19 @@
 import Foundation
 
+// 当前章节文件的实际屏幕分页；稳定位置索引继续用于目录、书签和续读。
+public struct ReaderRenderedPage: Equatable, Sendable {
+  public let current: Int
+  public let count: Int
+  public init?(progression: ClosedRange<Double>) {
+    let start = progression.lowerBound
+    let span = progression.upperBound - start
+    guard start.isFinite, span.isFinite, start >= 0, start <= 1, span > 0,
+      1 / span <= 1_000_000 else { return nil }
+    count = max(1, Int((1 / span).rounded()))
+    current = min(count, max(1, Int((start * Double(count)).rounded()) + 1))
+  }
+}
+
 // 页码输入、滑动定位和无障碍增减共用边界规则，外部页码从 1 开始。
 public enum ReaderPageNavigation {
   public static func page(_ value: Int, count: Int) -> Int {
