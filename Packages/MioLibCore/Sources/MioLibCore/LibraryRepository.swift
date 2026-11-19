@@ -5,6 +5,9 @@ public actor LibraryRepository {
   public nonisolated let paths: LibraryPaths
   let database: SQLiteDatabase
   var maintenance = false
+  // 正在使用的阅读副本由阅读器持有，缓存换包后延迟回收旧文件。
+  var activeWebReadingPaths: [String: Int] = [:]
+  var retiredWebReadingPaths: Set<String> = []
   public init(root: URL) throws {
     paths = try LibraryPaths(root: root)
     database = try SQLiteDatabase(url: root.appendingPathComponent("library.sqlite"))
@@ -103,9 +106,16 @@ public actor LibraryRepository {
     _ = try self.book(book.id)
     try putBook(book)
   }
-  public func updateProgress(bookID: UUID, position: ReadingPosition, progress: Double) throws {
+  public func updateProgress(bookID: UUID, position: ReadingPosition, progress: Double,
+    webSourcePath: String? = nil) throws
+  {
     try writable()
     var book = try book(bookID)
+    // 仍打开旧副本的阅读器可以翻阅，但不能把已删除的章写回当前进度。
+    if let webSourcePath {
+      guard book.originalPath == webSourcePath, let href = position.webResourceHref,
+        book.cachedWebChapters.contains(where: { $0.href == href }) else { return }
+    }
     book.position = position
     book.progress = ReadingProgress.normalized(progress)
     book.lastOpenedAt = Date()
@@ -145,25 +155,69 @@ public actor LibraryRepository {
   }
   // 封面与标题按书籍 ID 更新最新记录，阅读中设置封面不会覆盖刚保存的进度。
   public func updateBookMetadata(_ id: UUID, title: String? = nil,
-    coverData: Data? = nil, resetCover: Bool = false) throws
+    coverData: Data? = nil, resetCover: Bool = false, webAddress: String? = nil) throws
   {
     try writable()
     var value = try book(id)
     guard value.deletedAt == nil else { throw LibraryError.message("书籍已被删除") }
+    let oldWebAssets = value.format == .web ? Set(value.assetPaths) : []
     if let title {
       let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !trimmed.isEmpty else { throw LibraryError.message("书名不能为空") }
       value.customTitle = trimmed == value.originalTitle ? nil : trimmed
     }
     var created: String?
+    var newLink: String?
     do {
+      // 改链后旧正文和定位不再适用；笔记文字、原书籍 ID、收藏和所在书架保留。
+      if let webAddress {
+        guard value.format == .web else { throw LibraryError.message("只有网页书籍可以修改链接") }
+        let url = try WebAddress.url(webAddress)
+        if url != value.webURL {
+          let fingerprint = Self.webFingerprint(url)
+          if let duplicate = try existingBook(fingerprint: fingerprint), duplicate.id != id {
+            throw LibraryError.message("书架中已有此网址的书籍")
+          }
+          let linkPath = try storeWebLink(url)
+          newLink = linkPath
+          value.webURL = url
+          value.fingerprint = fingerprint
+          value.author = url.host ?? ""
+          value.originalPath = linkPath
+          value.readingPath = linkPath
+          value.webSnapshotDate = nil
+          value.webChapters = nil
+          value.webPendingChapters = nil
+          value.webCacheCompleted = nil
+          // 卷选择和已删章节的定位属于原链接，改链接后重新分析目录。
+          value.webVolumes = nil
+          value.webVolumeIDs = nil
+          value.webCacheRevision = nil
+          value.webRemovedChapterPrefixes = nil
+          value.position = nil
+          value.progress = 0
+          value.isFinished = false
+        }
+      }
       if let coverData {
         created = try storeCover(coverData)
         value.customCoverPath = created
       } else if resetCover { value.customCoverPath = nil }
-      try putBook(value)
+      // 取消失效的笔记定位和改链在同一个事务内提交，摘录、批注和颜色继续保留。
+      try database.transaction {
+        try putBook(value)
+        if newLink != nil {
+          for var note in try annotations(bookID: id) {
+            note.position = ReadingPosition()
+            try saveAnnotation(note)
+          }
+        }
+      }
+      // 仅在改链提交成功后回收旧的独占文件，其他书籍、封面或个人资料的引用优先保留。
+      if newLink != nil { removeUnusedWebAssets(oldWebAssets) }
     } catch {
       if let created { try? FileManager.default.removeItem(at: paths.url(created)) }
+      if let newLink { try? FileManager.default.removeItem(at: paths.url(newLink)) }
       throw error
     }
   }
@@ -327,9 +381,7 @@ public actor LibraryRepository {
     }
     // 只回收本次替换的头像文件；其他书籍和封面资源不受影响。
     if let oldAvatar, oldAvatar != prefs.profileAvatarPath {
-      let bookReferences = try? books(includeDeleted: true).flatMap {
-        [$0.originalPath, $0.readingPath] + [$0.coverPath, $0.customCoverPath].compactMap { $0 }
-      }
+      let bookReferences = try? books(includeDeleted: true).flatMap(\.assetPaths)
       let folderReferences = try? folders().compactMap(\.coverPath)
       if let bookReferences, let folderReferences,
          !bookReferences.contains(oldAvatar) && !folderReferences.contains(oldAvatar) {

@@ -29,21 +29,23 @@ extension View {
   func mioGlass(radius: CGFloat = 28, interactive: Bool = false) -> some View {
     modifier(MioGlassSurface(radius: radius, interactive: interactive))
   }
-  // 书架底板采用较浓的毛玻璃，封面独立放在上层，圆角留出更宽的呼吸空间。
-  func mioFrostedCard(radius: CGFloat = 30) -> some View {
-    modifier(MioFrostedCard(radius: radius))
+  // 承载文字和封面的面板使用常规玻璃，纯色底可跟随所在页面的主题。
+  func mioFrostedCard(radius: CGFloat = 30,
+                      opaqueBackground: Color = Color(.secondarySystemGroupedBackground)) -> some View {
+    modifier(MioFrostedCard(radius: radius, opaqueBackground: opaqueBackground))
   }
 }
 
 private struct MioFrostedCard: ViewModifier {
   let radius: CGFloat
+  let opaqueBackground: Color
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   func body(content: Content) -> some View {
     let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
     if reduceTransparency {
-      content.background(Color(.secondarySystemGroupedBackground), in: shape)
+      content.background(opaqueBackground, in: shape)
     } else if #available(iOS 26.0, *) {
-      // 每个书架使用自己的玻璃容器，邻近的两个书架不会融合成一块底板。
+      // 各面板独立采样玻璃材质，保持各自的圆角和边缘。
       GlassEffectContainer(spacing: 0) { content.glassEffect(.regular, in: shape) }
     } else {
       content.background(.regularMaterial, in: shape)

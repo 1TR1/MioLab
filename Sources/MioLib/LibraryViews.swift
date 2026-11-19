@@ -10,27 +10,33 @@ struct RootView: View {
   @State private var section = 0
   @State private var shelfEditing = false
   var body: some View {
-    Group {
-      if sizeClass == .regular {
-        NavigationSplitView {
-          List(selection:Binding<Int?>(get:{section},set:{section=$0 ?? 0})) {
-            Label("书架", systemImage: "books.vertical").tag(0)
-            Label("我的", systemImage: "person.crop.circle").tag(1)
-          }.navigationTitle("MioLib")
-        } detail: {
-          NavigationStack { page }
+    VStack(spacing: 0) {
+      // 导航栈和底栏分别占用实际高度，List 与 ScrollView 的可滚动范围在底栏上方结束。
+      Group {
+        if sizeClass == .regular {
+          NavigationSplitView {
+            List(selection:Binding<Int?>(get:{section},set:{section=$0 ?? 0})) {
+              Label("书架", systemImage: "books.vertical").tag(0)
+              Label("我的", systemImage: "person.crop.circle").tag(1)
+            }.navigationTitle("MioLib")
+          } detail: {
+            NavigationStack { page }
+          }
+        } else {
+          tabs
         }
-      } else {
-        tabs.safeAreaInset(edge: .bottom) {
-          if section != 0 || !shelfEditing { MioTabDock(selection: $section) }
-        }
-      }
+      }.frame(maxWidth: .infinity, maxHeight: .infinity)
+      // 撤销提示也参与布局，出现时为书架最后一行留出额外空间。
+      if !model.undoIDs.isEmpty { undoBar }
+      if sizeClass != .regular && (section != 0 || !shelfEditing) { MioTabDock(selection: $section) }
     }
     .onPreferenceChange(ShelfEditingKey.self) { shelfEditing = $0 }
     .sheet(isPresented: $model.importPresented) { ImportQueueView(model: model) }
     .sheet(item:Binding(get:{model.readerBook == nil ? model.sharedItems:nil},set:{model.sharedItems=$0})) { ShareSheet(items: $0.urls) }
     .fullScreenCover(item: $model.readerBook, onDismiss: { Task { try? await model.reload() } }) {
-      ReaderScreen(model: model, book: $0)
+      // 网页书籍在一层窗口内按书目设置进入阅读模式或原网页。
+      if $0.format == .web { WebBrowserScreen(model: model, initialURL: $0.webURL, book: $0) }
+      else { ReaderScreen(model: model, book: $0) }
     }
     .alert(
       "MioLib",
@@ -62,20 +68,16 @@ struct RootView: View {
         }
       }
     }
-    .safeAreaInset(edge: .bottom) {
-      if !model.undoIDs.isEmpty {
-        HStack {
-          Text("已移除 \(model.undoIDs.count) 本书")
-          Spacer()
-          Button("撤销") { model.undoDelete() }
-          Button {
-            model.undoIDs = []
-          } label: {
-            Image(systemName: "xmark")
-          }.accessibilityLabel("关闭撤销提示")
-        }.font(.subheadline).padding().background(.regularMaterial)
-      }
-    }
+  }
+  // 撤销提示紧邻滚动区域，编辑模式隐藏自定义底栏后仍可使用。
+  private var undoBar: some View {
+    HStack {
+      Text("已移除 \(model.undoIDs.count) 本书")
+      Spacer()
+      Button("撤销") { model.undoDelete() }
+      Button { model.undoIDs = [] } label: { Image(systemName: "xmark") }
+        .accessibilityLabel("关闭撤销提示")
+    }.font(.subheadline).padding().background(.regularMaterial)
   }
   // 两个导航栈保留各自状态，底部只有一套自定义导航，子页面不再恢复旧系统底栏。
   private var tabs: some View {
@@ -172,12 +174,17 @@ struct LibraryView: View {
     .searchable(text: $query, prompt: "搜索全书库的书名")
     .toolbar {
       ToolbarItem(placement: .topBarLeading) {
+        // 网页阅读常驻书架工具栏，无须先导入文件或创建电子书。
+        HStack {
+          NavigationLink { WebLibraryView(model: model) } label: { Image(systemName: "globe") }
+            .accessibilityLabel("网页阅读与网址收藏")
           Button(editing ? "完成" : "编辑") {
             withAnimation(reduceMotion ? nil : .snappy(duration: 0.22)) {
               editing.toggle()
               selected = []
             }
           }.disabled(model.maintenance)
+        }
       }
       ToolbarItemGroup(placement: .topBarTrailing) {
         Menu {
@@ -339,7 +346,7 @@ struct LibraryView: View {
     }.buttonStyle(.plain)
       if editing {
         Button { metadata = .book(book) } label: { Image(systemName: "pencil").frame(width: 32, height: 40) }
-          .buttonStyle(.borderless).accessibilityLabel("编辑\(book.title)的标题与封面")
+          .buttonStyle(.borderless).accessibilityLabel("编辑\(book.title)")
       }
     }
       .contextMenu { bookMenu(book) }
@@ -355,22 +362,24 @@ struct LibraryView: View {
     } else { model.open(book) }
   }
   @ViewBuilder private func bookMenu(_ book: Book) -> some View {
-    Button("编辑标题与封面", systemImage: "pencil") { metadata = .book(book) }
+    Button(book.format == .web ? "编辑标题、封面与链接" : "编辑标题与封面", systemImage: "pencil") { metadata = .book(book) }
+    // 只修改选中的状态字段，缓存与阅读进度可在书架菜单打开期间继续更新。
     Button(book.isFavorite ? "取消收藏" : "收藏", systemImage: "heart") {
-      var next = book
-      next.isFavorite.toggle()
-      model.run { try await $0.update(next) }
+      model.run { try await $0.batchEditBooks([book.id], favorite: !book.isFavorite) }
     }
     Button(book.isFinished ? "标为未读" : "标为已读", systemImage: "checkmark.circle") {
-      var next = book
-      next.isFinished.toggle()
-      model.run { try await $0.update(next) }
+      model.run { try await $0.batchEditBooks([book.id], finished: !book.isFinished) }
     }
     Button("移动到书架", systemImage: "folder") {
       selected = [book.id]
       moving = true
     }
-    if let original = model.fileURL(book.originalPath) {
+    if let url = book.webURL {
+      ShareLink(item: url) { Label("分享网页链接", systemImage: "square.and.arrow.up") }
+      if book.hasWebReadingCopy, let reading = model.fileURL(book.readingPath) {
+        ShareLink(item: reading) { Label("导出正文 EPUB", systemImage: "doc.richtext") }
+      }
+    } else if let original = model.fileURL(book.originalPath) {
       ShareLink(item: original) { Label("导出原书", systemImage: "square.and.arrow.up") }
     }
     Button("导出阅读笔记", systemImage: "quote.bubble") {
@@ -480,7 +489,8 @@ struct LibraryView: View {
   // 封面模式统一使用纵向大封面，移除紧凑网格的尺寸与背景分支。
   private var coversView: some View {
     ScrollView {
-      LazyVStack(alignment: .leading, spacing: 20) {
+      // 外层只排列筛选和网格，网格自行延迟创建卡片，避免两层延迟布局共同估算尾部高度。
+      VStack(alignment: .leading, spacing: 20) {
         if folderID == nil && query.isEmpty { filterRow }
         if query.isEmpty && filter == 0 {
           shelfCovers

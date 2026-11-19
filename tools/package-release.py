@@ -34,15 +34,36 @@ with zipfile.ZipFile(ipa) as archive:
     assert packed['CFBundleVersion'] == info['CFBundleVersion']
     assert packed['CFBundleIdentifier'] == 'com.miolib.reader'
     assert packed['UIFileSharingEnabled'] is True
+    # 原生 WebKit 保存图片依赖系统相册权限说明，交付时检查最终包避免 TCC 终止应用。
+    assert packed.get('NSPhotoLibraryAddUsageDescription', '').strip()
+    assert packed.get('NSPhotoLibraryUsageDescription', '').strip()
+    # 系统后台任务需要声明 processing 和与签名前包名匹配的任务标识。
+    assert 'processing' in packed.get('UIBackgroundModes', [])
+    assert f"{packed['CFBundleIdentifier']}.web-cache.*" in packed.get('BGTaskSchedulerPermittedIdentifiers', [])
+    # 安装包中的文库目录解析脚本必须是本轮实现，避免使用只读取首章的旧资源。
+    navigation = 'Sources/MioLib/Resources/WebChapterNavigation.js'
+    assert archive.read('Payload/MioLib.app/MioLib_MioLib.bundle/WebChapterNavigation.js') == (root / navigation).read_bytes()
+    # 阅读器图片菜单需要隔离的手势脚本，核对实际 IPA 中的资源。
+    image_menu = 'Sources/MioLib/Resources/ReaderImageMenu.js'
+    assert archive.read('Payload/MioLib.app/MioLib_MioLib.bundle/ReaderImageMenu.js') == (root / image_menu).read_bytes()
+    # 同页注释必须由实际安装包的正文提取脚本生成。
+    extractor = 'Sources/MioLib/Resources/WebArticleExtractor.js'
+    assert archive.read('Payload/MioLib.app/MioLib_MioLib.bundle/WebArticleExtractor.js') == (root / extractor).read_bytes()
+    # 注释点击必须走新版书页脚本，核对 Readium 实际打进 IPA 的资源。
+    footnote_script = 'Assets/Static/scripts/readium-footnote-links.js'
+    footnote_source = 'Vendor/Readium/Sources/Navigator/EPUB/' + footnote_script
+    assert archive.read('Payload/MioLib.app/Readium_ReadiumNavigator.bundle/' + footnote_script) == (root / footnote_source).read_bytes()
 
 # 排除本机缓存、安装日志、认证信息和构建产物，源码与固定依赖完整保存。
 excluded = {'.git', '.build', '.swiftpm', '.bsp', '.xtool', 'xtool', 'output', '__pycache__'}
+# 系统生成的缩略图和目录设置按 .gitignore 的约定留在本机。
+excluded_files = {'.ds_store', 'thumbs.db', 'desktop.ini'}
 with zipfile.ZipFile(source, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
     for directory, folders, files in os.walk(root):
         folders[:] = sorted(name for name in folders if name not in excluded)
         for name in sorted(files):
             path = Path(directory) / name
-            if path.suffix.lower() not in {'.pyc', '.ipa'}:
+            if name.lower() not in excluded_files and path.suffix.lower() not in {'.pyc', '.ipa'}:
                 archive.write(path, path.relative_to(root).as_posix())
 with zipfile.ZipFile(source) as archive:
     assert archive.testzip() is None
@@ -61,6 +82,52 @@ with zipfile.ZipFile(source) as archive:
     assert 'Sources/MioLib/ReaderPageChrome.swift' in archive.namelist()
     assert 'Sources/MioLib/Resources/ReaderLayout.css' in archive.namelist()
     assert 'docs/阅读页面布局.md' in archive.namelist()
+    # 网页入口、浏览会话、收藏存储和备份测试必须随 1.8.0 源码归档。
+    for name in ('Sources/MioLib/WebLibraryView.swift', 'Sources/MioLib/WebBrowserScreen.swift',
+                 'Sources/MioLib/WebBrowserSession.swift',
+                 'Packages/MioLibCore/Sources/MioLibCore/WebLibrary.swift',
+                 'Packages/MioLibCore/Sources/MioLibCore/WebContentFilter.swift',
+                 'Packages/MioLibCore/Tests/MioLibCoreTests/WebLibraryTests.swift',
+                 'docs/网页阅读与收藏.md'):
+        assert name in archive.namelist()
+    # 网页书籍、正文提取脚本、离线转换、测试和许可必须与新版 IPA 一并交付。
+    for name in ('Packages/MioLibCore/Sources/MioLibCore/WebBook.swift',
+                 'Packages/MioLibCore/Sources/MioLibCore/WebArticle.swift',
+                 'Packages/MioLibCore/Tests/MioLibCoreTests/WebBookTests.swift',
+                 'Sources/MioLib/WebArticleCapture.swift',
+                 'Sources/MioLib/Resources/Readability.js',
+                 'Sources/MioLib/Resources/WebArticleExtractor.js',
+                 'ThirdPartyNotices/Readability-LICENSE.md',
+                 'ThirdPartyNotices/Readability-UPSTREAM.md',
+                 'tools/test-web-article-extractor.cjs'):
+        assert name in archive.namelist()
+    # 网页切章的加载器、稳定章节缓存、合并器和回归测试必须与源码归档一起交付。
+    for name in ('Sources/MioLib/WebReaderNavigation.swift',
+                 'Sources/MioLib/WebBookCache.swift',
+                 'Sources/MioLib/WebCacheBackgroundExecution.swift',
+                 'Sources/MioLib/Resources/WebChapterNavigation.js',
+                 'Packages/MioLibCore/Sources/MioLibCore/WebChapter.swift',
+                 'Packages/MioLibCore/Sources/MioLibCore/WebChapterRepository.swift',
+                 'Packages/MioLibCore/Sources/MioLibCore/WebCacheRetry.swift',
+                 'Packages/MioLibCore/Sources/MioLibCore/WebBookAssembler.swift',
+                 'Packages/MioLibCore/Tests/MioLibCoreTests/WebChapterTests.swift',
+                 'Packages/MioLibCore/Tests/MioLibCoreTests/WebCacheRetryTests.swift'):
+        assert name in archive.namelist()
+    # 分卷持久化、设置入口和图片保存实现均随源码发布。
+    for name in ('Packages/MioLibCore/Sources/MioLibCore/WebBookVolume.swift',
+                 'Packages/MioLibCore/Sources/MioLibCore/WebVolumeRepository.swift',
+                 'Packages/MioLibCore/Tests/MioLibCoreTests/WebVolumeTests.swift',
+                 'Sources/MioLib/WebCacheSettingsView.swift',
+                 'Sources/MioLib/ReaderImageMenu.swift', image_menu):
+        assert name in archive.namelist()
+    # 开书弹窗和导出入口一起归档，源码可复现先选卷再缓存的流程。
+    assert 'Sources/MioLib/WebCacheSelectionView.swift' in archive.namelist()
+    # 一并交付注释小窗、Readium 识别源码与解析测试。
+    for name in ('Sources/MioLib/ReaderFootnote.swift',
+                 footnote_source,
+                 'Vendor/Readium/Sources/Navigator/EPUB/EPUBNoteReference.swift',
+                 'Vendor/Readium/Tests/NavigatorTests/EPUB/EPUBNoteReferenceTests.swift'):
+        assert name in archive.namelist()
 
 # 摘要流式计算，旧版本条目保留，方便安装或传输后核对。
 manifest_path = output / 'delivery.json'

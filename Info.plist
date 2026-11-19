@@ -3,16 +3,24 @@
 <plist version="1.0"><dict>
 <!-- 应用身份、通用设备支持及 USB 文件共享。 -->
 <key>CFBundleDisplayName</key><string>MioLib</string>
-<!-- 1.7.1 扩大正文上下留白，修正工具栏锚点与前置摄像头安全区适配。 -->
-<key>CFBundleShortVersionString</key><string>1.7.1</string>
-<key>CFBundleVersion</key><string>15</string>
+<!-- 1.12.0 逐本保存网页阅读模式，支持直接退出与后台重试缓存。 -->
+<!-- 1.15.4 注释小窗按注释文字的高度排版。 -->
+<key>CFBundleShortVersionString</key><string>1.15.4</string>
+<key>CFBundleVersion</key><string>28</string>
+<!-- 用户确认缓存后由 iOS 26 及更新系统继续下载，任务标识按每次缓存队列生成。 -->
+<key>BGTaskSchedulerPermittedIdentifiers</key><array><string>com.miolib.reader.web-cache.*</string></array>
+<key>UIBackgroundModes</key><array><string>processing</string></array>
 <key>LSRequiresIPhoneOS</key><true/>
 <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
 <key>UIFileSharingEnabled</key><true/>
 <key>LSSupportsOpeningDocumentsInPlace</key><true/>
-<!-- Calibre 在用户的局域网内提供书库，不为公网请求关闭 ATS。 -->
+<!-- WKWebView 原生“保存图像”会访问系统相册；缺少用途说明时 iOS 会直接终止应用。 -->
+<key>NSPhotoLibraryAddUsageDescription</key><string>将你在网页中选择的图片保存到系统相册。</string>
+<!-- 兼容 WebKit 使用照片读写授权的系统版本，只有用户主动保存图片时才触发系统询问。 -->
+<key>NSPhotoLibraryUsageDescription</key><string>在你选择保存网页图片时访问系统相册。</string>
+<!-- Calibre 使用局域网；仅网页浏览器允许用户主动输入的 HTTP 网站。 -->
 <key>NSLocalNetworkUsageDescription</key><string>连接你电脑上的 Calibre 内容服务器，浏览书库并下载所选电子书。</string>
-<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 <key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 <!-- 注册已有文档类型，接收其他应用传入的原始文件。 -->

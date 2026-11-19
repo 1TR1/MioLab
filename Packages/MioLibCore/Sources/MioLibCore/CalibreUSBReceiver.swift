@@ -61,7 +61,7 @@ public actor CalibreUSBReceiver {
           manifest.title.utf8.count <= 8192, manifest.author.utf8.count <= 8192,
           manifest.sha256.count == 64,
           manifest.sha256.unicodeScalars.allSatisfy({ "0123456789abcdef".unicodeScalars.contains($0) }),
-          let format = BookFormat(rawValue: URL(fileURLWithPath: manifest.filename).pathExtension),
+          let format = BookFormat(rawValue: URL(fileURLWithPath: manifest.filename).pathExtension), format != .web,
           manifest.filename == "book.\(format.rawValue)"
         else { throw LibraryError.message("Calibre USB 传书清单无效，请重新发送") }
         let source = directory.appendingPathComponent(manifest.filename)

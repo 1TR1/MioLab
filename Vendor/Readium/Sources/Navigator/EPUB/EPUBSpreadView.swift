@@ -17,8 +17,11 @@ protocol EPUBSpreadViewDelegate: AnyObject {
     /// Called when the user tapped on an external link.
     func spreadView(_ spreadView: EPUBSpreadView, didTapOnExternalURL url: URL)
 
-    /// Called when the user tapped on an internal link.
-    func spreadView(_ spreadView: EPUBSpreadView, didTapOnInternalLink href: String, clickEvent: ClickEvent?)
+    /// Called when the user tapped on an internal link. The source frame resolves relative note references.
+    func spreadView(_ spreadView: EPUBSpreadView, didTapOnInternalLink href: RelativeURL, from sourceURL: URL?, clickEvent: ClickEvent?)
+
+    // 从同一次 DOM 点击得到注释目标，即使 WebKit 不发出页内导航事件也能处理。
+    func spreadView(_ spreadView: EPUBSpreadView, didActivateFootnote href: RelativeURL, referrer: String)
 
     /// Called when the user tapped on a decoration.
     func spreadView(_ spreadView: EPUBSpreadView, didActivateDecoration id: Decoration.Id, inGroup group: DecorationGroup, frame: CGRect?, point: CGPoint?)
@@ -51,6 +54,12 @@ class EPUBSpreadView: UIView, Loggable, PageView {
     let webView: WebView
 
     private var lastClick: ClickEvent?
+    // 独立脚本环境避免 EPUB 页面自行调用注释消息接口。
+    private static let footnoteWorld = WKContentWorld.world(name: "Readium.FootnoteLinks")
+    private static let footnoteMessage = "readiumFootnoteLink"
+    static let footnoteScript = Bundle.module.url(
+        forResource: "readium-footnote-links", withExtension: "js", subdirectory: "Assets/Static/scripts"
+    ).flatMap { try? String(contentsOf: $0, encoding: .utf8) }
 
     /// If YES, the content will be faded in once loaded.
     let animatedLoad: Bool
@@ -96,6 +105,7 @@ class EPUBSpreadView: UIView, Loggable, PageView {
         for script in scripts {
             webView.configuration.userContentController.addUserScript(script)
         }
+        installFootnoteScript()
         registerJSMessages()
 
         NotificationCenter.default.addObserver(self, selector: #selector(voiceOverStatusDidChange), name: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil)
@@ -526,6 +536,22 @@ class EPUBSpreadView: UIView, Loggable, PageView {
     private var JSMessages: [String: (Any) -> Void] = [:]
     private var JSMessagesEnabled = false
 
+    // 固定版式的正文位于子 frame，流式版式在主 frame，两者都安装点击处理。
+    private func installFootnoteScript() {
+        guard let script = Self.footnoteScript,
+            let data = try? JSONEncoder().encode(viewModel.publicationBaseURL.string) else { return }
+        let base = String(decoding: data, as: UTF8.self)
+        let source = """
+            (() => {
+            \(script)
+            readiumInstallFootnoteLinks(\(base));
+            })();
+            """
+        webView.configuration.userContentController.addUserScript(WKUserScript(
+            source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Self.footnoteWorld
+        ))
+    }
+
     /// Register a new JS message handler to be emitted from scripts.
     func registerJSMessage(named name: String, handler: @escaping (Any) -> Void) {
         guard JSMessages[name] == nil else {
@@ -561,6 +587,7 @@ class EPUBSpreadView: UIView, Loggable, PageView {
         for name in JSMessages.keys {
             webView.configuration.userContentController.add(self, name: name)
         }
+        webView.configuration.userContentController.add(self, contentWorld: Self.footnoteWorld, name: Self.footnoteMessage)
     }
 
     /// Removes message handlers (preventing strong reference cycle).
@@ -572,6 +599,22 @@ class EPUBSpreadView: UIView, Loggable, PageView {
         for name in JSMessages.keys {
             webView.configuration.userContentController.removeScriptMessageHandler(forName: name)
         }
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: Self.footnoteMessage, contentWorld: Self.footnoteWorld)
+    }
+
+    // 同时检查脚本传来的实际文档地址和本书阅读顺序，排除其他 frame 或书外资源。
+    private func didActivateFootnote(_ message: WKScriptMessage) {
+        guard JSMessagesEnabled, message.webView === webView,
+            let values = message.body as? [String: String],
+            let source = values["source"].flatMap({ URL(string: $0) }),
+            let relativeSource = viewModel.publicationBaseURL.relativize(source),
+            let sourceIndex = viewModel.readingOrder.firstIndexWithHREF(relativeSource),
+            spread.contains(index: sourceIndex),
+            let target = values["target"].flatMap({ URL(string: $0) }),
+            let href = viewModel.publicationBaseURL.relativize(target),
+            let referrer = values["referrer"]
+        else { return }
+        delegate?.spreadView(self, didActivateFootnote: href, referrer: referrer)
     }
 
     private func didReceiveKeyEvent(_ event: Any) {
@@ -632,6 +675,10 @@ class EPUBSpreadView: UIView, Loggable, PageView {
 extension EPUBSpreadView: WKScriptMessageHandler {
     /// Handles incoming calls from JS.
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == Self.footnoteMessage {
+            didActivateFootnote(message)
+            return
+        }
         guard let handler = JSMessages[message.name] else {
             return
         }
@@ -652,10 +699,13 @@ extension EPUBSpreadView: WKNavigationDelegate {
         var policy: WKNavigationActionPolicy = .allow
 
         if navigationAction.navigationType == .linkActivated {
+            // The click markup belongs to this activation only.
+            defer { lastClick = nil }
             if let url = navigationAction.request.url {
                 // Check if url is internal or external
                 if let relativeURL = viewModel.publicationBaseURL.relativize(url) {
-                    delegate?.spreadView(self, didTapOnInternalLink: relativeURL.string, clickEvent: lastClick)
+                    delegate?.spreadView(self, didTapOnInternalLink: relativeURL,
+                                         from: navigationAction.sourceFrame.request.url, clickEvent: lastClick)
                 } else {
                     delegate?.spreadView(self, didTapOnExternalURL: url)
                 }

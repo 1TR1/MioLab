@@ -9,14 +9,17 @@ let package = Package(
     products: [.library(name: "MioLib", targets: ["MioLib"])],
     dependencies: [
         .package(path: "Packages/MioLibCore"),
-        .package(path: "Vendor/Readium")
+        .package(path: "Vendor/Readium"),
+        // 注释预览与 Readium 共用 SwiftSoup 的 HTML 解析器。
+        .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.13.5")
     ],
     targets: [
         .target(name: "MioLib", dependencies: [
             "MioLibCore",
             .product(name: "ReadiumShared", package: "Readium"),
             .product(name: "ReadiumStreamer", package: "Readium"),
-            .product(name: "ReadiumNavigator", package: "Readium")
+            .product(name: "ReadiumNavigator", package: "Readium"),
+            .product(name: "SwiftSoup", package: "SwiftSoup")
         ], resources: [.process("Resources")])
     ],
     swiftLanguageModes: [.v5]

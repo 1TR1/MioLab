@@ -29,3 +29,9 @@
   text-indent: 0 !important;
   text-align: start !important;
 }
+
+/* 网页作者、来源和列表不采用小说首行缩进，继续共用普通书籍的字体与分页设置。 */
+:root[style] body[data-miolib-web-article] :is(.byline, .source, .list-item) {
+  text-indent: 0 !important;
+  text-align: start !important;
+}

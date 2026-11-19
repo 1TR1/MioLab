@@ -29,6 +29,8 @@ final class ReaderInterfaceTests: XCTestCase {
     XCTAssertEqual(prefs.theme, .paper)
     XCTAssertTrue(prefs.scroll)
     XCTAssertTrue(prefs.serif)
+    // 旧偏好升级后直接获得小窗预览。
+    XCTAssertEqual(prefs.footnoteMode, .preview)
     XCTAssertEqual(try LibraryJSON.decode(ReaderPreferences.self, from: Data("{}".utf8)), ReaderPreferences())
   }
 
@@ -83,8 +85,8 @@ final class ReaderInterfaceTests: XCTestCase {
     XCTAssertEqual(recovered, migrated)
   }
 
-  // 封面布局与排序在真实数据库重开及完整备份恢复后保持一致。
-  func testSortAndLayoutPersistAcrossReopenAndBackup() async throws {
+  // 书架布局、排序和注释链接模式经数据库重开与整库备份后保持一致。
+  func testReaderPreferencesPersistAcrossReopenAndBackup() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let source = try LibraryRepository(root: root.appendingPathComponent("source"))
@@ -92,6 +94,7 @@ final class ReaderInterfaceTests: XCTestCase {
     prefs.shelfLayout = .covers
     prefs.bookSort = .title
     prefs.fontSize = 125
+    prefs.footnoteMode = .jump
     try await source.savePreferences(prefs)
     let reopened = try LibraryRepository(root: root.appendingPathComponent("source"))
     let stored = try await reopened.preferences()

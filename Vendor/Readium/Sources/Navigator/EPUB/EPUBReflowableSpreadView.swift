@@ -227,10 +227,9 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
     private var pendingLocation: PendingLocation = .init(location: .start, animated: false)
 
     override func go(to location: PageLocation, animated: Bool) async {
+        // 分页初次稳定之前仍可能收到新定位，使用最新目标覆盖预加载时的章首或章末。
+        pendingLocation = PendingLocation(location: location, animated: animated)
         guard isSpreadLoaded else {
-            // Delays moving to the location until the document is loaded.
-            pendingLocation = PendingLocation(location: location, animated: animated)
-
             await waitGoToCompletion()
             return
         }
@@ -245,6 +244,15 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
         }
 
         didCompleteGoTo()
+    }
+
+    // 把页内定位结果交给注释跳转，避免仅凭外层切页成功就显示返回栏。
+    func goToVerifiedLocation(_ locator: Locator) async -> Bool {
+        let location = PageLocation.locator(locator)
+        if !isSpreadLoaded { await go(to: location, animated: false) }
+        guard isSpreadLoaded, superview != nil, !Task.isCancelled else { return false }
+        pendingLocation = PendingLocation(location: location, animated: false)
+        return await go(to: locator, animated: false)
     }
 
     private func waitGoToCompletion() async {
@@ -338,7 +346,14 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
     /// Scrolls at the tag with ID `tagID`.
     @discardableResult
     private func scroll(toTagID tagID: String, animated: Bool) async -> Bool {
-        let result = await evaluateScript("readium.scrollToId(\'\(tagID)\', \(animated));")
+        // Encode the literal ID so punctuation in an EPUB fragment survives the script call.
+        guard let data = try? JSONEncoder().encode(tagID) else { return false }
+        let literal = String(decoding: data, as: UTF8.self)
+        // 旧书使用命名锚点，空锚点后面的实际注释段落也可作为定位目标。
+        let script = Self.footnoteScript.map {
+            "(() => {\n\($0)\nreturn readiumScrollToFragment(\(literal), \(animated));\n})();"
+        } ?? "readium.scrollToId(\(literal), \(animated));"
+        let result = await evaluateScript(script)
         switch result {
         case let .success(value):
             return (value as? Bool) ?? false

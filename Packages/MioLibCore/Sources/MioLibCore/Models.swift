@@ -2,10 +2,11 @@ import Foundation
 
 // 文件格式使用原始扩展名；TXT 与 Kindle 文件另有稳定的 EPUB 阅读副本。
 public enum BookFormat: String, Codable, CaseIterable, Sendable {
-  case epub, txt, pdf, mobi, azw3
-  public var label: String { rawValue.uppercased() }
+  case epub, txt, pdf, mobi, azw3, web
+  // 网页书籍由收藏入口创建，文件导入仍只接受原来的五种格式。
+  public var label: String { self == .web ? "网页" : rawValue.uppercased() }
   public static func detect(_ url: URL) throws -> BookFormat {
-    guard let format = BookFormat(rawValue: url.pathExtension.lowercased()) else {
+    guard let format = BookFormat(rawValue: url.pathExtension.lowercased()), format != .web else {
       throw LibraryError.message("不支持此格式：\(url.pathExtension)")
     }
     return format
@@ -32,6 +33,28 @@ public struct Book: Codable, Identifiable, Equatable, Sendable {
   public var isFinished: Bool
   public var deletedAt: Date?
   public var position: ReadingPosition?
+  // 可选字段兼容旧书库；未提取正文时阅读路径与链接描述文件相同。
+  public var webURL: URL?
+  // 每本网页书独立记住阅读模式。旧书目没有这一字段时打开原网页。
+  public var webReaderEnabled: Bool?
+  public var webSnapshotDate: Date?
+  // 可选章节清单兼容 1.9.0 的单页正文；各章资源路径一经保存就保持稳定。
+  public var webChapters: [WebBookChapter]?
+  // 已下载但尚未并入阅读副本的章节随书目持久化，中途退出后可以继续。
+  public var webPendingChapters: [WebBookChapter]?
+  public var webCacheCompleted: Bool?
+  // 可识别的卷目录与离线选择分别保存。没有选择记录的旧书延续整本缓存。
+  public var webVolumes: [WebBookVolume]?
+  public var webVolumeIDs: [String]?
+  // 修改选择后让旧下载失效，并保留删卷时的资源定位供以后重新下载。
+  var webCacheRevision: UUID?
+  var webRemovedChapterPrefixes: [String: String]?
+  public var hasWebReadingCopy: Bool { format == .web && readingPath != originalPath }
+  // 所有本地资源共用同一清单，备份、恢复和改链清理不会漏掉已缓存的章节。
+  public var assetPaths: [String] {
+    [originalPath, readingPath] + [coverPath, customCoverPath].compactMap { $0 }
+      + (webChapters ?? []).map(\.readingPath) + (webPendingChapters ?? []).map(\.readingPath)
+  }
   public var title: String { customTitle ?? originalTitle }
   public var effectiveCover: String? { customCoverPath ?? coverPath }
   public init(
@@ -166,6 +189,16 @@ public enum ReaderTheme: String, Codable, CaseIterable, Sendable {
     }
   }
 }
+
+// 书内注释的打开方式随阅读偏好保存。
+public enum ReaderFootnoteMode: String, Codable, CaseIterable, Sendable {
+  case preview, jump
+
+  public var label: String {
+    switch self { case .preview: "小窗预览"; case .jump: "直接跳转" }
+  }
+}
+
 // 仅保留列表与封面两种布局，两者共享编辑能力。
 public enum ShelfLayout: String, Codable, CaseIterable, Sendable {
   case list, covers
@@ -243,6 +276,7 @@ public struct ReaderPreferences: Codable, Equatable, Sendable {
   public var margins: Double = 1.5
   public var serif: Bool = false
   public var scroll: Bool = false
+  public var footnoteMode: ReaderFootnoteMode = .preview
   public var shelfLayout: ShelfLayout = .list
   // 四宫格仅改变显示方式，原有书架封面仍独立保存。
   public var shelfCoverStyle: ShelfCoverStyle = .single
@@ -261,6 +295,7 @@ public struct ReaderPreferences: Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case interfaceTextSize, interfaceFont
     case theme, fontSize, lineHeight, margins, serif, scroll, grid, shelfLayout, shelfCoverStyle, bookSort
+    case footnoteMode
     case profileName, profileBio, profileAvatarPath
   }
   // 逐字段提供默认值，旧版备份没有新增字段时也能完整恢复。
@@ -274,6 +309,8 @@ public struct ReaderPreferences: Codable, Equatable, Sendable {
     margins = try values.decodeIfPresent(Double.self, forKey: .margins) ?? 1.5
     serif = try values.decodeIfPresent(Bool.self, forKey: .serif) ?? false
     scroll = try values.decodeIfPresent(Bool.self, forKey: .scroll) ?? false
+    // 旧版偏好与备份缺少此字段时，默认在原页预览。
+    footnoteMode = try values.decodeIfPresent(ReaderFootnoteMode.self, forKey: .footnoteMode) ?? .preview
     let oldGrid = try values.decodeIfPresent(Bool.self, forKey: .grid) ?? false
     shelfLayout = try values.decodeIfPresent(ShelfLayout.self, forKey: .shelfLayout) ?? (oldGrid ? .covers : .list)
     // 兼容旧版数据库与备份，缺少样式字段时继续使用单张封面。
@@ -294,6 +331,7 @@ public struct ReaderPreferences: Codable, Equatable, Sendable {
     try values.encode(margins, forKey: .margins)
     try values.encode(serif, forKey: .serif)
     try values.encode(scroll, forKey: .scroll)
+    try values.encode(footnoteMode, forKey: .footnoteMode)
     try values.encode(grid, forKey: .grid)
     try values.encode(shelfLayout, forKey: .shelfLayout)
     // 样式随偏好存入数据库，并由现有完整备份流程一并保存。

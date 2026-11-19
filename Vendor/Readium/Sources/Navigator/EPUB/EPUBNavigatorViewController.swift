@@ -7,7 +7,6 @@
 import ReadiumInternal
 import ReadiumShared
 import SafariServices
-import SwiftSoup
 import UIKit
 import WebKit
 
@@ -254,6 +253,8 @@ open class EPUBNavigatorViewController: InputObservableViewController,
 
     private let readingOrder: [Link]
     public private(set) var currentLocation: Locator?
+    // A newer link activation supersedes a note whose resource is still loading.
+    private var linkActivationTask: Task<Void, Never>?
     private let loadPositionsByReadingOrder: () async -> ReadResult<[[Locator]]>
     private var positionsByReadingOrder: [[Locator]] = []
 
@@ -700,6 +701,12 @@ open class EPUBNavigatorViewController: InputObservableViewController,
         return await spreadView.findFirstVisibleElementLocator()
     }
 
+    /// Reads the visible position before undoable navigation, including scroll changes not yet reported to the delegate.
+    public func locationSnapshot() async -> Locator? {
+        guard state == .idle else { return currentLocation }
+        return await computeCurrentLocationAndViewport().0
+    }
+
     /// Last current location notified to the delegate.
     /// Used to avoid sending twice the same location.
     private var notifiedCurrentLocation: Locator?
@@ -726,6 +733,16 @@ open class EPUBNavigatorViewController: InputObservableViewController,
     }
 
     public func go(to locator: Locator, options: NavigatorGoOptions) async -> Bool {
+        await go(to: locator, options: options, verifiesNoteDestination: false)
+    }
+
+    // 注释需要确认内页定位，避免切到正确的章却仍留在章首。
+    public func go(toNote link: Link) async -> Bool {
+        guard let locator = await publication.locate(link) else { return false }
+        return await go(to: locator, options: .none, verifiesNoteDestination: true)
+    }
+
+    private func go(to locator: Locator, options: NavigatorGoOptions, verifiesNoteDestination: Bool) async -> Bool {
         let locator = publication.normalizeLocator(locator)
 
         guard
@@ -737,7 +754,22 @@ open class EPUBNavigatorViewController: InputObservableViewController,
             return false
         }
 
-        let success = await paginationView.goToIndex(spreadIndex, location: .locator(locator), options: options)
+        var success = await paginationView.goToIndex(spreadIndex, location: .locator(locator), options: options)
+        if success, verifiesNoteDestination {
+            if let spread = await paginationView.currentViewAfterLoading(at: spreadIndex) as? EPUBSpreadView {
+                if let reflowable = spread as? EPUBReflowableSpreadView {
+                    success = await reflowable.goToVerifiedLocation(locator)
+                } else {
+                    // 固定版式在整页上显示锚点，等待目标页加载即可。
+                    await spread.go(to: .locator(locator), animated: false)
+                    success = spread.isSpreadLoaded
+                }
+            } else {
+                success = false
+            }
+        }
+        // 旋转或重新排版可以中断跳转，不发送过期的定位结果。
+        guard state == .jumping(pendingLocator: locator) else { return false }
         on(.jumped)
         if success {
             delegate?.navigator(self, didJumpTo: locator)
@@ -1104,37 +1136,59 @@ extension EPUBNavigatorViewController: EPUBSpreadViewDelegate {
     func spreadView(_ spreadView: EPUBSpreadView, didTapOnExternalURL url: URL) {
         guard state == .idle else { return }
 
+        // An external link also supersedes pending note content.
+        linkActivationTask?.cancel()
         delegate?.navigator(self, presentExternalURL: url)
     }
 
-    func spreadView(_ spreadView: EPUBSpreadView, didTapOnInternalLink href: String, clickEvent: ClickEvent?) {
-        guard
-            let url = AnyURL(string: href),
-            var link = publication.linkWithHREF(url)
-        else {
+    func spreadView(_ spreadView: EPUBSpreadView, didTapOnInternalLink href: RelativeURL, from sourceURL: URL?, clickEvent: ClickEvent?) {
+        // 保留旧导航回调，兼容由无障碍或书内脚本触发的链接。
+        let source = sourceURL ?? viewModel.url(to: spreadView.spread.first.link).url
+        let referrer: String?
+        if let markup = clickEvent?.interactiveElement,
+           let (anchor, resolved) = try? EPUBNoteReference.destination(in: markup, from: source),
+           let target = viewModel.publicationBaseURL.relativize(resolved),
+           target.removingFragment().isEquivalentTo(href.removingFragment()), target.fragment == href.fragment
+        {
+            referrer = (try? anchor.html()) ?? ""
+        } else {
+            referrer = nil
+        }
+        activateInternalLink(href, on: spreadView, noteReferrer: referrer)
+    }
+
+    func spreadView(_ spreadView: EPUBSpreadView, didActivateFootnote href: RelativeURL, referrer: String) {
+        activateInternalLink(href, on: spreadView, noteReferrer: referrer)
+    }
+
+    // 两种点击路线只在这里读取注释和调用委托，定位失败有明确反馈。
+    private func activateInternalLink(_ href: RelativeURL, on spreadView: EPUBSpreadView, noteReferrer: String?) {
+        linkActivationTask?.cancel()
+        guard var link = publication.linkWithHREF(href) else {
             log(.warning, "Cannot find link with HREF: \(href)")
+            if noteReferrer != nil, state == .idle, paginationView?.currentView === spreadView {
+                delegate?.navigator(self, presentError: .noteTargetUnavailable)
+            }
             return
         }
-        link.href = href
+        link.href = href.string
 
-        Task {
-            // Check to see if this was a noteref link and give delegate the
-            // opportunity to display it.
-            if
-                let clickEvent = clickEvent,
-                let interactive = clickEvent.interactiveElement,
-                let (note, referrer) = await getNoteData(anchor: interactive, href: href),
-                let delegate = delegate
-            {
-                if !delegate.navigator(
-                    self,
-                    shouldNavigateToNoteAt: link,
-                    content: note,
-                    referrer: referrer
-                ) {
+        linkActivationTask = Task { [weak self, weak spreadView] in
+            guard let self, let spreadView, !Task.isCancelled else { return }
+            if let noteReferrer {
+                let content = await noteContent(at: href)
+                // 已经离开该书页时，忽略迟到的注释结果。
+                guard !Task.isCancelled, state == .idle, paginationView?.currentView === spreadView else { return }
+                guard let content else {
+                    delegate?.navigator(self, presentError: .noteTargetUnavailable)
+                    return
+                }
+                let referrer = noteReferrer.isEmpty ? nil : noteReferrer
+                if let delegate, !delegate.navigator(self, shouldNavigateToNoteAt: link, content: content, referrer: referrer) {
                     return
                 }
             }
+            guard !Task.isCancelled, state == .idle else { return }
 
             // Ask if we should navigate to the link
             if let delegate = delegate, !delegate.navigator(self, shouldNavigateToLink: link) {
@@ -1145,46 +1199,15 @@ extension EPUBNavigatorViewController: EPUBSpreadViewDelegate {
         }
     }
 
-    /// Checks if the internal link is a noteref, and retrieves both the referring text of the link and the body of the note.
-    ///
-    /// Uses the navigation href from didTapOnInternalLink because it is normalized to a path within the book,
-    /// whereas the anchor tag may have just a hash fragment like `#abc123` which is hard to work with.
-    /// We do at least validate to ensure that the two hrefs match.
-    ///
-    /// Uses `#id` when retrieving the body of the note, not `aside#id` because it may be a `<section>`.
-    /// See https://idpf.github.io/epub-vocabs/structure/#footnotes
-    /// and http://kb.daisy.org/publishing/docs/html/epub-type.html#ex
-    func getNoteData(anchor: String, href: String) async -> (String, String)? {
+    // 只通过本书资源接口读取目标文档。UTF-16 EPUB 也保留实际锚点。
+    private func noteContent(at href: RelativeURL) async -> String? {
         do {
-            let doc = try parse(anchor)
-            guard let link = try doc.select("a[epub:type=noteref]").first() else { return nil }
-
-            let anchorHref = try link.attr("href")
-            guard href.hasSuffix(anchorHref) else { return nil }
-
-            guard
-                let url = AnyURL(string: href),
-                let id = url.fragment
-            else {
-                log(.warning, "Could not find hash in link \(href)")
-                return nil
-            }
-
-            // Read the note's resource through the publication's resource API.
-            guard let resource = publication.get(url.removingFragment()) else {
-                log(.warning, "Could not open note resource: \(href)")
-                return nil
-            }
-            let contents = try await resource.read().asString().get()
-            let document = try parse(contents)
-
-            guard let aside = try document.select("#\(id)").first() else {
-                log(.warning, "Could not find the element '#\(id)' in document \(href)")
-                return nil
-            }
-
-            return try (aside.html(), link.html())
-
+            guard let resource = publication.get(href.removingFragment()) else { return nil }
+            let data = try await resource.read().get()
+            guard !Task.isCancelled else { return nil }
+            let isUTF16 = data.starts(with: [0xFE, 0xFF]) || data.starts(with: [0xFF, 0xFE])
+            guard let contents = String(data: data, encoding: isUTF16 ? .utf16 : .utf8) else { return nil }
+            return try EPUBNoteReference.content(in: contents, fragment: href.fragment)
         } catch {
             log(.warning, "Caught error while getting note content: \(error)")
             return nil

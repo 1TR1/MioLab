@@ -27,6 +27,8 @@ final class SQLiteDatabase {
     try run("CREATE INDEX IF NOT EXISTS annotations_book ON annotations(book_id)")
     try run("CREATE TABLE IF NOT EXISTS settings(id TEXT PRIMARY KEY, payload BLOB NOT NULL)")
     try run("CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, payload BLOB NOT NULL)")
+    // 增量建表兼容现有书库，收藏网址不混入电子书或导入任务。
+    try run("CREATE TABLE IF NOT EXISTS web_bookmarks(id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, payload BLOB NOT NULL)")
     try run("PRAGMA user_version=1")
   }
   deinit { sqlite3_close(handle) }

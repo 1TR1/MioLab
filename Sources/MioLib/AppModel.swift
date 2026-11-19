@@ -8,6 +8,11 @@ import UniformTypeIdentifiers
   @Published var folders: [LibraryFolder] = []
   @Published var notes: [Annotation] = []
   @Published var jobs: [ImportJob] = []
+  // 网页收藏独立显示，仍与书库共享同一数据库和备份流程。
+  @Published var webBookmarks: [WebBookmark] = []
+  @Published var webPreferences = WebPreferences()
+  // 下载任务独立于网页与阅读窗口，在两种模式和书架之间切换时继续运行。
+  lazy var webBookCache = WebBookCache(model: self)
   @Published var preferences = ReaderPreferences()
   @Published var readerBook: Book?
   @Published var requestedAnnotation: Annotation?
@@ -75,15 +80,18 @@ import UniformTypeIdentifiers
     let nextBooks = try await repository.books()
     let nextFolders = try await repository.folders()
     let nextJobs = try await repository.jobs()
+    let nextBookmarks = try await repository.webBookmarks()
     let ids = Set(nextBooks.map(\.id))
     let nextNotes = try await repository.annotations().filter { ids.contains($0.bookID) }
     if books != nextBooks { books = nextBooks }
     if folders != nextFolders { folders = nextFolders }
     if jobs != nextJobs { jobs = nextJobs }
+    if webBookmarks != nextBookmarks { webBookmarks = nextBookmarks }
     if notes != nextNotes { notes = nextNotes }
     if loadPreferences {
       let settings = try await repository.preferences()
       if settings != preferences { preferences = settings }
+      webPreferences = try await repository.webPreferences()
     }
   }
   func run(_ operation: @escaping (LibraryRepository) async throws -> Void) {
@@ -261,6 +269,7 @@ import UniformTypeIdentifiers
     do { try await repository?.savePreferences(preferences) }
     catch { message = error.localizedDescription }
   }
+  // 打开只呈现书籍。网页缓存由书内的卷选择器或设置里的明确操作发起。
   func open(_ book: Book, annotation: Annotation? = nil) {
     requestedAnnotation = annotation
     readerBook = book

@@ -50,6 +50,7 @@ struct ReaderMatch: Identifiable {
   let savesProgress: Bool
   @Published var loading = true
   @Published var error: String?
+  @Published var imageSaveNotice: String?
   @Published var controls = false
   @Published var progress: Double
   @Published var positionLabel = ""
@@ -82,12 +83,25 @@ struct ReaderMatch: Identifiable {
   @Published var searching = false
   @Published var searchMessage = ""
   @Published var draft: Annotation?
+  // 小窗内容与返回位置只属于当前阅读会话。
+  @Published private(set) var footnotePreview: ReaderFootnote?
+  @Published private(set) var footnoteReturnLocation: Locator?
+  @Published var footnoteDocument: ReaderFootnoteDocument?
+  @Published private var footnoteNavigationTask: Task<Void, Never>?
+  var navigatingFootnote: Bool { footnoteNavigationTask != nil }
   lazy var host = ReaderHostController(session: self)
   var publication: Publication?
   var positions: [Locator] = []
   var latestPosition: ReadingPosition?
   private var saveTask: Task<Void, Never>?
   private var searchTask: Task<Void, Never>?
+  // 聚合正文切换时暂停旧会话写入，防止退出回调把新章位置覆盖回旧章。
+  private var progressSuspended = false
+  var currentResourceHref: String? {
+    if let json = latestPosition?.locatorJSON, let locator = try? Locator(jsonString: json) { return locator.href.string }
+    return nil
+  }
+  var currentWebChapter: WebBookChapter? { book.webChapter(href: currentResourceHref) }
   init(model: AppModel, book: Book, savesProgress: Bool = true) {
     self.model = model
     self.book = book
@@ -101,7 +115,7 @@ struct ReaderMatch: Identifiable {
     latestPosition = position
     self.progress = ReadingProgress.normalized(progress)
     positionLabel = label
-    guard savesProgress else { return }
+    guard savesProgress, !progressSuspended else { return }
     saveTask?.cancel()
     let value = self.progress
     saveTask = Task {
@@ -109,21 +123,30 @@ struct ReaderMatch: Identifiable {
         try await Task.sleep(for: .milliseconds(500))
         try Task.checkCancellation()
         try await model.repository?.updateProgress(
-          bookID: book.id, position: position, progress: value)
+          bookID: book.id, position: position, progress: value,
+          webSourcePath: book.format == .web ? book.originalPath : nil)
       } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
   }
   func flush() async {
-    guard savesProgress else { return }
+    guard savesProgress, !progressSuspended else { return }
     host.captureCurrentPosition()
     saveTask?.cancel()
     if let position = latestPosition {
       do {
         try await model.repository?.updateProgress(
-          bookID: book.id, position: position, progress: progress)
+          bookID: book.id, position: position, progress: progress,
+          webSourcePath: book.format == .web ? book.originalPath : nil)
       } catch { model.message = error.localizedDescription }
     }
   }
+  // 先保存当前页再暂停防抖写入，切章失败时可以继续在原正文阅读。
+  func suspendForWebNavigation() async {
+    await flush()
+    progressSuspended = true
+    saveTask?.cancel()
+  }
+  func resumeAfterWebNavigation() { progressSuspended = false }
   func seek(_ value: Double) {
     if let document = host.pdfView?.document, document.pageCount > 0 {
       host.goPDF(page: min(document.pageCount - 1, Int(value * Double(document.pageCount))))
@@ -179,6 +202,76 @@ struct ReaderMatch: Identifiable {
       host.goPDF(page: page)
     } else if let json = note.position.locatorJSON, let locator = try? Locator(jsonString: json) {
       Task { _ = await host.epub?.go(to: locator) }
+    }
+  }
+
+  // 小窗预览只读内容；直接模式使用同一个跳转入口。
+  func openFootnote(_ link: ReadiumShared.Link, content: String) {
+    guard !navigatingFootnote else { return }
+    switch model.preferences.footnoteMode {
+    case .preview: footnotePreview = ReaderFootnote(link: link, content: content)
+    case .jump: jumpToFootnote(link)
+    }
+  }
+
+  // 在页面移动之前保存 Readium 的 Locator，跳转成功后才显示返回栏。
+  func jumpToFootnote(_ link: ReadiumShared.Link) {
+    guard !navigatingFootnote, let epub = host.epub else { return }
+    navigateFootnote { session in
+      let visible = await epub.locationSnapshot()
+      let saved = session.latestPosition?.locatorJSON.flatMap { try? Locator(jsonString: $0) }
+      guard let origin = visible ?? epub.currentLocation ?? saved else {
+        throw LibraryError.message("阅读位置尚未准备好，请重试。")
+      }
+      try Task.checkCancellation()
+      // EPUB 可将尾注放在翻页顺序之外，使用独立书页显示同一书包中的原文。
+      if let document = try await session.host.makeFootnoteDocument(for: link, in: epub.publication) {
+        session.dismissFootnotePreview()
+        session.footnoteDocument = document
+      } else {
+        guard await epub.go(toNote: link) else {
+          // 目标页已切换而锚点未找到时恢复原位，并保留原小窗便于查看。
+          try Task.checkCancellation()
+          _ = await epub.go(to: origin)
+          throw LibraryError.message("无法跳转到此注释。")
+        }
+        session.dismissFootnotePreview()
+      }
+      return origin
+    }
+  }
+
+  // 取消跳转恢复原定位；关闭提示栏只清除返回入口。
+  func undoFootnoteJump() {
+    guard !navigatingFootnote, let origin = footnoteReturnLocation, let epub = host.epub else { return }
+    if footnoteDocument != nil {
+      dismissFootnoteDocument()
+      return
+    }
+    navigateFootnote { _ in
+      guard await epub.go(to: origin) else {
+        throw LibraryError.message("暂时无法回到原阅读位置，请重试。")
+      }
+      return nil
+    }
+  }
+  func dismissFootnotePreview() { footnotePreview = nil }
+  func dismissFootnoteReturnBar() { footnoteReturnLocation = nil }
+  func dismissFootnoteDocument() {
+    footnoteDocument = nil
+    dismissFootnoteReturnBar()
+  }
+
+  // 串行提交跳转与撤销，避免快速点按覆盖已保存的返回位置。
+  private func navigateFootnote(_ move: @escaping (ReaderSession) async throws -> Locator?) {
+    footnoteNavigationTask = Task { [weak self] in
+      guard let self, !Task.isCancelled else { return }
+      defer { footnoteNavigationTask = nil }
+      do {
+        let origin = try await move(self)
+        try Task.checkCancellation()
+        footnoteReturnLocation = origin
+      } catch is CancellationError {} catch { self.error = error.localizedDescription }
     }
   }
 
@@ -291,6 +384,9 @@ struct ReaderMatch: Identifiable {
   func close() {
     searchTask?.cancel()
     saveTask?.cancel()
+    // 退出阅读时停止待处理的注释操作。
+    footnoteNavigationTask?.cancel()
+    footnoteNavigationTask = nil
     host.cancelLoading()
   }
 }
@@ -303,6 +399,8 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
   private weak var session: ReaderSession?
   private var loadTask: Task<Void, Never>?
   private var pageObserver: NSObjectProtocol?
+  // 新版缓存合并时仍可使用旧包，直到实际持有它的 Readium 控制器释放。
+  private var webReadingFile: (repository: LibraryRepository, path: String)?
   private var lastPreferences: ReaderPreferences?
   var epub: EPUBNavigatorViewController?
   var pdfView: MioPDFView?
@@ -321,12 +419,33 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
   deinit {
     loadTask?.cancel()
     if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
+    if let file = webReadingFile { Task { await file.repository.releaseWebReadingPath(file.path) } }
   }
 
   // 解析通过异步 API 调用，加载状态仅覆盖内容区，始终保留关闭入口。
   private func load() async {
-    guard let session, let url = session.model.fileURL(session.book.readingPath) else { return }
+    guard let session, var url = session.model.fileURL(session.book.readingPath) else { return }
     do {
+      // 未提取的网页只在浏览器进入阅读模式，禁止把链接描述文件误当 EPUB 打开。
+      if session.book.format == .web && !session.book.hasWebReadingCopy {
+        throw LibraryError.message("请先在原网页中选择阅读模式，提取正文后再打开书页")
+      }
+      if session.book.format == .web, let repository = session.model.repository {
+        // 入口取得旧快照与包合并恰好重叠时，可使用新版包中相同的阅读定位。
+        var path = session.book.readingPath
+        if !(await repository.retainWebReadingPath(path)) {
+          let current = try await repository.book(session.book.id)
+          guard current.originalPath == session.book.originalPath,
+            let freshURL = session.model.fileURL(current.readingPath),
+            await repository.retainWebReadingPath(current.readingPath) else {
+            throw LibraryError.message("离线正文不可用，请重新打开网页书籍")
+          }
+          path = current.readingPath
+          url = freshURL
+        }
+        webReadingFile = (repository, path)
+        try Task.checkCancellation()
+      }
       if session.book.format == .pdf {
         try await loadPDF(url)
       } else {
@@ -489,6 +608,25 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
     else if let epub, let locator = epub.currentLocation { updateEPUBProgress(epub, locator: locator) }
   }
 
+  // 常规尾注与正文共用翻页和进度；非线性资源独立显示，保留原正文的进度和定位。
+  func makeFootnoteDocument(for link: ReadiumShared.Link, in publication: Publication) async throws
+    -> ReaderFootnoteDocument?
+  {
+    let href = link.url().removingFragment().removingQuery()
+    guard publication.readingOrder.firstWithHREF(href) == nil else { return nil }
+    guard let session, let resource = publication.linkWithHREF(href), resource.mediaType?.isHTML == true,
+      let locator = await publication.locate(link) else {
+      throw LibraryError.message("无法打开此注释所在的书页。")
+    }
+    try Task.checkCancellation()
+    var config = EPUBNavigatorViewController.Configuration()
+    config.preferences = epubPreferences(session.model.preferences)
+    config.editingActions = []
+    let navigator = try EPUBNavigatorViewController(
+      publication: publication, initialLocation: locator, readingOrder: [resource], config: config)
+    return ReaderFootnoteDocument(navigator: navigator)
+  }
+
   // 退出封面预览或阅读加载页时停止解析，不让已关闭的界面继续生成位置列表。
   func cancelLoading() { loadTask?.cancel() }
 
@@ -544,10 +682,13 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
   // 主题和排版只在偏好实际变化时更新，保持当前定位与选择状态。
   func applyPreferences(_ preferences: ReaderPreferences) {
     let preferences = resolvedPreferences(preferences)
-    guard lastPreferences != preferences else { return }
+    let previous = lastPreferences
+    guard previous != preferences else { return }
     lastPreferences = preferences
-    epub?.submitPreferences(epubPreferences(preferences))
-    if let pdf = pdfView {
+    // 切换注释方式时只更新会话策略，保持当前排版和滚动位置。
+    let layout = epubPreferences(preferences)
+    if previous.map(epubPreferences) != layout { epub?.submitPreferences(layout) }
+    if let pdf = pdfView, previous?.scroll != preferences.scroll || previous?.theme != preferences.theme {
       let old = pdf.currentDestination
       pdf.displayDirection = preferences.scroll ? .vertical : .horizontal
       pdf.displayMode = preferences.scroll ? .singlePageContinuous : .singlePage
@@ -588,6 +729,12 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
 
   // 样式只注入可重排 EPUB；固定版式与 PDF 完整保留原书页内容。
   func navigator(_ navigator: EPUBNavigatorViewController, setupUserScripts controller: WKUserContentController) {
+    // 网页提取的插图使用专用离线保存菜单，其它 EPUB 保持原来的交互。
+    if let session, session.savesProgress, session.book.format == .web, let publication = session.publication {
+      ReaderImageMenu.install(in: controller, host: self, publication: publication) { [weak session] notice in
+        session?.imageSaveNotice = notice
+      }
+    }
     guard session?.publication?.metadata.layout != .fixed,
       let url = Bundle.module.url(forResource: "ReaderLayout", withExtension: "css"),
       let css = try? String(contentsOf: url, encoding: .utf8),
@@ -730,6 +877,22 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
     _ gestureRecognizer: UIGestureRecognizer,
     shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
   ) -> Bool { true }
+
+  // 已识别的书内注释由会话处理，封面预览沿用 Readium 默认导航。
+  func navigator(_ navigator: Navigator, shouldNavigateToNoteAt link: ReadiumShared.Link,
+                 content: String, referrer: String?) -> Bool {
+    guard let session, session.savesProgress, navigator === epub else { return true }
+    if viewIfLoaded?.window != nil { session.openFootnote(link, content: content) }
+    return false
+  }
+
+  // 目录、搜索等独立跳转完成后，收起上一次的注释返回提示。
+  func navigator(_ navigator: Navigator, didJumpTo locator: Locator) {
+    if let session, !session.navigatingFootnote, session.footnoteReturnLocation != nil {
+      session.dismissFootnoteReturnBar()
+    }
+  }
+
   func navigator(_ navigator: Navigator, locationDidChange locator: Locator) {
     guard let epub = navigator as? EPUBNavigatorViewController else { return }
     updateEPUBProgress(epub, locator: locator)
@@ -759,7 +922,12 @@ final class ReaderHostController: UIViewController, EPUBNavigatorDelegate,
       label: locator.title ?? "正文")
   }
   func navigator(_ navigator: Navigator, presentError error: NavigatorError) {
-    session?.error = error.localizedDescription
+    // 可识别的注释链接断开时给出原因，正文位置继续保留。
+    if case .noteTargetUnavailable = error {
+      session?.error = "书内找不到这条注释的目标，或目标页无法读取。"
+    } else {
+      session?.error = error.localizedDescription
+    }
   }
   func navigator(_ navigator: Navigator, presentExternalURL url: URL) {
     let alert = UIAlertController(title: "打开外部链接？", message: url.host, preferredStyle: .alert)

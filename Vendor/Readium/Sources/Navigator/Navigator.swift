@@ -145,4 +145,6 @@ public extension NavigatorDelegate {
 public enum NavigatorError: Error {
     /// The user tried to copy the text selection but the DRM License doesn't allow it.
     case copyForbidden
+    // 识别到了注释链接，但书包缺少目标页或锚点。
+    case noteTargetUnavailable
 }

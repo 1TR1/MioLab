@@ -78,6 +78,13 @@ final class PaginationView: UIView, Loggable {
         loadedViews[currentIndex]
     }
 
+    // 跨章切页可能先返回转场，再创建书页。需要核对锚点的调用等待目标页可用。
+    func currentViewAfterLoading(at index: Int) async -> (UIView & PageView)? {
+        guard currentIndex == index else { return nil }
+        if currentView == nil { await loadPagesTask?.value }
+        return currentIndex == index ? currentView : nil
+    }
+
     /// Loaded page views in reading order.
     private var orderedViews: [UIView & PageView] {
         var orderedViews = loadedViews

@@ -51,7 +51,7 @@ public struct CalibreDownload: Identifiable, Equatable, Sendable {
       index > 0 && url.pathComponents[index].lowercased() == "get"
         ? BookFormat(rawValue: part.lowercased()) : nil
     }.first
-    guard let format = types[type] ?? BookFormat(rawValue: url.pathExtension.lowercased()) ?? pathFormat
+    guard let format = types[type] ?? BookFormat(rawValue: url.pathExtension.lowercased()) ?? pathFormat, format != .web
     else { return nil }
     self.url = url
     self.format = format

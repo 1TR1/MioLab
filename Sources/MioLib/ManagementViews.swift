@@ -45,6 +45,9 @@ struct MetadataEditor: View {
   let target: MetadataTarget
   @Environment(\.dismiss) private var dismiss
   @State private var title: String
+  // 网页链接沿用普通书籍编辑表单，与标题及封面一起提交。
+  @State private var webAddress: String
+  @State private var error: String?
   @State private var photo: PhotosPickerItem?
   @State private var filePicker = false
   @State private var crop: PickedCover?
@@ -59,6 +62,8 @@ struct MetadataEditor: View {
     self.model = model
     self.target = target
     _title = State(initialValue: target.title)
+    if case .book(let book) = target { _webAddress = State(initialValue: book.webURL?.absoluteString ?? "") }
+    else { _webAddress = State(initialValue: "") }
   }
   var body: some View {
     NavigationStack {
@@ -78,8 +83,12 @@ struct MetadataEditor: View {
           if case .folder = target {
             Button("从书架中的书籍选择", systemImage: "books.vertical") { folderBooks = true }
           }
-          if case .book = target {
+          if case .book(let book) = target {
             Button("从书页选择封面", systemImage: "doc.richtext") { bookPages = true }
+              .disabled(book.format == .web && !book.hasWebReadingCopy)
+            if book.format == .web && !book.hasWebReadingCopy {
+              Text("首次进入阅读模式并提取正文后，可从书页选择封面。").font(.caption).foregroundStyle(.secondary)
+            }
           }
           Button("恢复默认封面", systemImage: "arrow.counterclockwise") {
             coverData = nil
@@ -90,17 +99,27 @@ struct MetadataEditor: View {
           TextField("名称", text: $title).textInputAutocapitalization(.never)
           if case .book(let book) = target { Button("恢复原标题") { title = book.originalTitle } }
         }
+        // 改链会使原来的正文定位失效，保存前说明对进度与笔记的影响。
+        if case .book(let book) = target, book.format == .web {
+          Section {
+            TextField("https://example.com", text: $webAddress, axis: .vertical)
+              .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+          } header: { Text("网页链接") } footer: {
+            Text("修改链接后需重新提取正文，阅读进度会重置。已有笔记文字保留，旧定位会清除；网址收藏中的链接独立保存。")
+          }
+        }
+        if let error { Section { Text(error).foregroundStyle(.red) } }
         Section { Text("标题和封面保存在书库中，并随完整备份保存。").font(.footnote).foregroundStyle(.secondary) }
       }.navigationTitle(target.isFolder ? "编辑书架" : "编辑书籍").navigationBarTitleDisplayMode(.inline)
         .toolbar {
-          ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+          ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(saving) }
           ToolbarItem(placement: .confirmationAction) {
             Button("保存") { save() }.disabled(
               title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || saving)
           }
         }
         .overlay { if saving { ProgressView() } }
-    }
+    }.interactiveDismissDisabled(saving)
     .onChange(of: photo) { _, item in
       Task {
         do {
@@ -168,7 +187,8 @@ struct MetadataEditor: View {
       do {
         switch target {
         case .book(let original):
-          try await repository.updateBookMetadata(original.id, title: title, coverData: coverData, resetCover: resetCover)
+          try await repository.updateBookMetadata(original.id, title: title, coverData: coverData,
+            resetCover: resetCover, webAddress: original.format == .web ? webAddress : nil)
         case .folder(let original):
           var folder = try await repository.folders().first { $0.id == original.id } ?? original
           let path = try await coverData.asyncMap { try await repository.storeCover($0) }
@@ -179,7 +199,7 @@ struct MetadataEditor: View {
         try await model.reload()
         dismiss()
       } catch {
-        model.message = error.localizedDescription
+        self.error = error.localizedDescription
         saving = false
       }
     }
@@ -570,6 +590,12 @@ struct MyView: View {
         }.font(.body).padding(.horizontal, 20 * scale).frame(minHeight: max(44, 56 * scale))
       }
       RoundedSettingsGroup("阅读记录") {
+        // 网页收藏与书内书签分别管理，两个入口共用同一个收藏列表。
+        NavigationLink { WebLibraryView(model: model) } label: {
+          RoundedSettingsRow(title: "网页阅读与收藏", symbol: "globe", color: .blue,
+                             value: "\(model.webBookmarks.count)")
+        }.buttonStyle(FluidButtonStyle())
+        RoundedSettingsDivider()
         NavigationLink { NotesView(model: model) } label: {
           RoundedSettingsRow(title: "阅读笔记与书签", symbol: "quote.bubble.fill", color: .orange,
                              value: "\(model.notes.count)")
@@ -597,6 +623,15 @@ struct MyView: View {
         Button { readingSettings = true } label: {
           RoundedSettingsRow(title: "阅读字体与排版", symbol: "textformat.size")
         }.buttonStyle(FluidButtonStyle())
+        // 与书内阅读设置共用注释偏好，未打开书时也能切换。
+        RoundedSettingsDivider()
+        Menu {
+          Picker("注释链接", selection: preference(\.footnoteMode)) {
+            ForEach(ReaderFootnoteMode.allCases, id: \.self) { Text($0.label).tag($0) }
+          }
+        } label: {
+          RoundedSettingsRow(title: "注释链接", symbol: "text.bubble", value: model.preferences.footnoteMode.label)
+        }.buttonStyle(FluidButtonStyle())
         RoundedSettingsDivider()
         Menu {
           Picker("书架布局", selection: preference(\.shelfLayout)) {
@@ -621,6 +656,12 @@ struct MyView: View {
           }
         } label: {
           RoundedSettingsRow(title: "书籍排序", symbol: "arrow.up.arrow.down", color: .orange, value: model.preferences.bookSort.label)
+        }.buttonStyle(FluidButtonStyle())
+      }
+      RoundedSettingsGroup("数据管理") {
+        // 网页书离线卷与普通书的源文件分开管理。
+        NavigationLink { WebCacheSettingsView(model: model) } label: {
+          RoundedSettingsRow(title: "网页书籍缓存", symbol: "arrow.down.circle", color: .blue)
         }.buttonStyle(FluidButtonStyle())
       }
       RoundedSettingsGroup("关于 MioLib") {
@@ -650,7 +691,7 @@ struct MyView: View {
   private var licenseText: String {
     guard let url = Bundle.module.url(forResource: "ThirdPartyNotices", withExtension: "txt") else {
       return
-        "Readium · BSD-3-Clause\nZIPFoundation · MIT\nlibmobi 0.12 · LGPL-3.0-or-later\n完整许可随源码附带。"
+        "Readium · BSD-3-Clause\nZIPFoundation · MIT\nlibmobi 0.12 · LGPL-3.0-or-later\nMozilla Readability 0.6.0 · Apache-2.0\n完整许可随源码附带。"
     }
     return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
   }

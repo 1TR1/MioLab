@@ -21,7 +21,9 @@ struct MioLibApp: App {
         )
         .onOpenURL { model.receive($0) }
         // 生命周期事件不等待防抖计时，保存书架布局、排序和阅读偏好。
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase, initial: true) { _, phase in
+          // 网页缓存独立使用系统后台任务，退回书架或锁屏时保持队列断点。
+          model.webBookCache.sceneChanged(phase)
           if phase != .active { Task { await model.flushPreferences() } }
         }
         // 回到前台立即接收，保持前台时每三秒检查；后台不持续占用电量或网络。
